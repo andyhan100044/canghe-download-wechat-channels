@@ -1239,18 +1239,43 @@ def command_resolve(args: argparse.Namespace) -> dict[str, Any]:
     return result
 
 
+def _fallback_candidate(
+    video: ResolvedVideo, selected: VideoCandidate
+) -> VideoCandidate | None:
+    """Compatible candidate to retry with when an "original" URL is rejected."""
+    if selected.kind != "original":
+        return None
+    by_kind = {candidate.kind: candidate for candidate in video.candidates}
+    return by_kind.get("h264") or by_kind.get("default")
+
+
 def command_download(args: argparse.Namespace) -> dict[str, Any]:
     text = _read_input(args.text, args.input_file)
     video, selected, mode = _resolve_and_select(args, text, consume_on_success=False)
     output = Path(args.output_dir).expanduser().resolve() if args.output_dir else default_output_dir()
     filename = args.filename or suggested_filename(video)
-    path, size, content_type = download_media(
-        selected.url,
-        output,
-        filename,
-        timeout=args.timeout,
-        max_bytes=int(args.max_size_gb * 1024**3),
-    )
+    try:
+        path, size, content_type = download_media(
+            selected.url,
+            output,
+            filename,
+            timeout=args.timeout,
+            max_bytes=int(args.max_size_gb * 1024**3),
+        )
+    except ChannelsError as exc:
+        fallback = _fallback_candidate(video, selected)
+        if exc.code != "DOWNLOAD_HTTP_ERROR" or fallback is None:
+            raise
+        # finder.video.qq.com 现在要求完整签名参数；裁剪后的“原画”地址会 400，
+        # 这里退回到带完整参数的兼容地址，而不是让整个下载失败。
+        path, size, content_type = download_media(
+            fallback.url,
+            output,
+            filename,
+            timeout=args.timeout,
+            max_bytes=int(args.max_size_gb * 1024**3),
+        )
+        selected = fallback
     _consume_official_profile_file(getattr(args, "official_profile", None))
     result = resolved_public_dict(video, selected)
     result.update(
